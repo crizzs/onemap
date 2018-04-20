@@ -3,43 +3,47 @@ import re
 import urllib
 import datetime
 import requests
-
 import svy21
 
 _om = {}
-def OneMap(access_key):
+def OneMap(creds):
     global _om
-    if access_key not in _om:
-        _om[access_key] = OneMapAPI(access_key)
-    return _om[access_key]
-
+    if creds not in _om:
+        _om[creds] = OneMapAPI(creds)
+    return _om[creds]
 
 class OneMapAPI(object):
 
-    BASE_DOMAIN = "http://www.onemap.sg"
-    API_ROUTE = "/API/services.svc"
-    COMMON_PARAMS = {"wc": "", "returnGeom": 1, "rset": 1, "otptflds": "SEARCHVAL,CATEGORY,THEME"}
+    BASE_DOMAIN = "https://developers.onemap.sg"
+    API_ROUTE = ""
+    COMMON_PARAMS = {"searchVal": "", "returnGeom": "Y", "getAddrDetails":"Y"}
     WILDCARD_PATTERNS = {
         "startswith": "%s like '%s$'",
         "endswith": "%s like '$%s'",
         "includes": "%s like '$%s$'",
         "plain": "%s like '%s'"
     }
-
-    def __init__(self, access_key):
-        self.access_key = access_key
+    
+    def __init__(self, creds):
+        self.creds = creds
         self.token = None
         self.token_expiry = None
 
 
     def _ping(self, endpoint, params, api_route=None):
-
-        if endpoint != 'getToken' and not params.get('token'):
+        
+        #change url if the method is for token getting
+        if params.get('token'):
+            url = "%s%s%s" % (self.BASE_DOMAIN, self.API_ROUTE, endpoint)
+        else:
+            url = "%s%s%s?%s" % (self.BASE_DOMAIN, self.API_ROUTE, endpoint, urllib.urlencode(params))
+       
+        if not params.get('token'):
             if not self.token:
                 self.get_token()
             params['token'] = self.token
-
-        url = "%s/%s/%s?%s" % (self.BASE_DOMAIN, api_route or self.API_ROUTE, endpoint, urllib.urlencode(params))
+        
+        print url
         rv = requests.get(url)
 
         data = {}
@@ -49,11 +53,26 @@ class OneMapAPI(object):
 
         try:
             data = rv.json()
-            items = rv.json().pop(data.keys()[0])
-            if 'ErrorMessage' in items[0] or 'PageCount' in items[0]:
-                s = items.pop(0)
-                error = s.get('ErrorMessage')
-                page_count = s.get('PageCount', 0)
+            items;
+            if params.get('token'):
+
+                items = rv.json().pop(data.keys()[0])
+                
+            else:
+                
+                items = rv.json().pop(data.keys()[2])
+                
+            
+            if items == "[]":
+                error = []
+                page_count = 0
+            elif items == "You are not an authorised user!":
+                error = []
+                page_count = 0
+                items =[]
+            elif params.get('token'):
+                items = [{"token":items}]
+
         except ValueError as e:
             error = e
 
@@ -68,12 +87,10 @@ class OneMapAPI(object):
         )
         return OMR
 
-
+    #wildcard function is not valid    
     def _validate_wildcard(self, term, wildcard, search_by=None):
-        if wildcard not in self.WILDCARD_PATTERNS.keys():
-            raise OneMapError("'wildcard' parameter needs to be one of 'startswith', 'endswith' or 'includes'")
-        else:
-            wildcard = self.WILDCARD_PATTERNS[wildcard] % (search_by or 'searchVal', term)
+        
+        wildcard =  term
 
         return wildcard
 
@@ -86,16 +103,11 @@ class OneMapAPI(object):
         return 1 if page is None else int(page)
 
 
-    # def _validate_fields(self, field):
-    #     fields = map(lambda x: x.strip(), fields.split(","))
-    #     if all(map(lambda x: x in ))
-
-
     def _params(self, **kwargs):
         data = self.COMMON_PARAMS.copy()
 
         if kwargs.get('term') and kwargs.get('wildcard'):
-            data['wc'] = self._validate_wildcard(kwargs.get('term'), kwargs.get('wildcard'), kwargs.get('search_by'))
+            data['searchVal'] = self._validate_wildcard(kwargs.get('term'), kwargs.get('wildcard'), kwargs.get('search_by'))
 
         if kwargs.get('with_geo') is not None:
             data['returnGeom'] = self._validate_geo(kwargs.get('with_geo'))
@@ -110,76 +122,24 @@ class OneMapAPI(object):
 
 
     def get_token(self):
-
+        
         if self.token and self.token_expire and datetime.datetime.utcnow() < self.token_expiry:
             return self.token
 
-        data = self._ping('getToken', {"accessKey": self.access_key})
+        data = self._ping('/privateapi/auth/get/getToken?'+self.creds, {"token": "Y"})
 
         if data.raw.get('GetToken') and \
           len(data.raw.get('GetToken')) and \
           data.raw.get('GetToken')[0].get('NewToken'):
             self.token = data.raw.get('GetToken')[0].get('NewToken')
-            self.token_expiry = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+            self.token_expiry = datetime.datetime.utcnow() + datetime.timedelta(hours=72)
             return self.token
 
 
     def search_address(self, term, wildcard='startswith', **kwargs):
-        '''
-        Basic address search on OneMap
+        
+        data = self._ping("/commonapi/search", self._params(term=term, wildcard=wildcard, **kwargs))
 
-        args
-            term          Address string to search, eg. "City Hall"
-
-        kwargs
-            wildcard         Performs a wildcard search. Value can be one of 'startswith', 'endswith' or 'includes'
-                             In common regex syntax, these are the effects of the wildcard values:
-                                'startswith' :   "^<term>"
-                                'endswith'   :   "<term>$"
-                                'includes'   :   ".*<term>.*"
-
-            with_geo         True, to return geometry (ie. coordinates) in results, False otherwise
-
-            page             Page number to return. Default 1. Result sets are limited to 10 per page
-        '''
-
-        data = self._ping("basicSearch", self._params(term=term, wildcard=wildcard, **kwargs))
-
-        return data
-
-
-    def search_theme(self, term, wildcard='plain', search_by='theme', **kwargs):
-        '''
-        Search OneMap with terms in certain themes
-        Themes and categories to search for can be found at: http://www.onemap.sg/themeexp/themeexplorer.aspx#
-
-        Usage:
-
-        >>> OM = OneMap(<onemap_api_token>)
-        >>> OM.search_term(term="wireless_hotspots", search_by="theme")
-        ...results...
-
-        args
-            term            The search term.
-                            This will be used in the query in the format,
-                            wc="<search_by> like '<term>'"
-
-        kwargs
-
-            wildcard        Performs a wildcard search. Value can be one of 'startswith', 'endswith' or 'includes'
-                            In common regex syntax, these are the effects of the wildcard values:
-                               'startswith' :   "^<term>"
-                               'endswith'   :   "<term>$"
-                               'includes'   :   ".*<term>.*"
-
-            search_by       The search category in which to perform this search, used in the following format
-                            wc="<search_by> like '<term>'"
-                            Defaults to 'theme'
-        '''
-
-        params = self._params(**kwargs)
-        params['wc'] = self._validate_wildcard(term, wildcard, search_by=search_by)
-        data = self._ping('themesearch', params)
         return data
 
 
@@ -239,30 +199,6 @@ class OneMapAPI(object):
             "maxsolns": max_solutions
         }, api_route="/publictransportation/service1.svc")
 
-
-    def filter(self, results, **filters):
-        '''
-        Filters a given OneMap API result set
-
-        args
-            results          Result set returned from the OneMap API
-
-        kwargs
-            filters          Dictionary of filters
-                             filter() will return only records that match key-value pairs in filters
-        '''
-
-        res = []
-        if 'SearchResults' in results:
-            res = results['SearchResults']
-
-        res_iter = iter(res)
-        meta = res_iter.next()
-        for f, value in filters.iteritems():
-            res = filter(lambda x: x[f] == value, res_iter)
-
-        return res
-
     def resolve(self, address, buffer=10):
         m = re.match("(?P<lng>\d+\.\d+),\s?(?P<lat>\d+\.\d+)", address)
         if m:
@@ -292,6 +228,7 @@ class OneMapAPI(object):
 class OneMapResult(object):
 
     def __init__(self, endpoint, params, status_code, page_count, items, error=None, raw=None):
+        print items
         self.endpoint = endpoint
         self.params = params
         self.status_code = status_code
